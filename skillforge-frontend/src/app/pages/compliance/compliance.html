@@ -1,0 +1,188 @@
+<div class="sf-page fade-in">
+
+  <!-- Toast -->
+  @if (toast()) {
+    <div class="sf-toast fade-in" [class.sf-toast-error]="toastType() === 'error'">
+      <i class="bi" [ngClass]="toastType() === 'success' ? 'bi-check-circle-fill' : 'bi-exclamation-triangle-fill'"></i>
+      {{ toast() }}
+    </div>
+  }
+
+  <!-- Header -->
+  <div class="sf-page-header">
+    <div>
+      <nav aria-label="breadcrumb">
+        <ol class="breadcrumb sf-breadcrumb mb-1">
+          <li class="breadcrumb-item sf-muted">Home</li>
+          <li class="breadcrumb-item active">Compliance & Audit</li>
+        </ol>
+      </nav>
+      <h2 class="sf-page-title">Compliance & Audit</h2>
+    </div>
+    @if (isHR) {
+      <button class="sf-btn-primary" (click)="runComplianceCheck()" [disabled]="refreshLoading()">
+        @if (refreshLoading()) {
+          <span class="spinner-border spinner-border-sm me-1"></span>Running...
+        } @else {
+          <i class="bi bi-shield-check me-1"></i>Run Compliance Check
+        }
+      </button>
+    }
+  </div>
+
+  <!-- Stat cards (HR only) -->
+  @if (isHR) {
+    @if (summary()) {
+      <div class="row g-3 mb-3">
+        <div class="col-6 col-md-3">
+          <div class="sf-card text-center py-3">
+            <div class="fs-3 fw-bold text-cyan">{{ summary()!.totalEmployees }}</div>
+            <div class="sf-muted small">Total Employees</div>
+          </div>
+        </div>
+        <div class="col-6 col-md-3">
+          <div class="sf-card text-center py-3">
+            <div class="fs-3 fw-bold text-success">{{ summary()!.compliantCount }}</div>
+            <div class="sf-muted small">Compliant</div>
+          </div>
+        </div>
+        <div class="col-6 col-md-3">
+          <div class="sf-card text-center py-3">
+            <div class="fs-3 fw-bold text-danger">{{ summary()!.nonCompliantCount }}</div>
+            <div class="sf-muted small">Non-Compliant</div>
+          </div>
+        </div>
+        <div class="col-6 col-md-3">
+          <div class="sf-card text-center py-3">
+            <div class="fs-3 fw-bold text-warning">{{ summary()!.complianceRate | number:'1.0-1' }}%</div>
+            <div class="sf-muted small">Compliance Rate</div>
+          </div>
+        </div>
+      </div>
+    }
+  }
+
+  <div class="row g-3">
+
+    <!-- Compliance Records (HR only) -->
+    @if (isHR) {
+      <div class="col-md-6">
+        <div class="sf-card h-100">
+          <div class="sf-card-title mb-2"><i class="bi bi-shield-check me-2"></i>Compliance Records</div>
+
+          <!-- Filter bar -->
+          <div class="d-flex gap-2 align-items-center flex-wrap mb-2">
+            <div class="sf-input-group" style="max-width:200px;">
+              <span class="sf-input-icon"><i class="bi bi-search"></i></span>
+              <input class="sf-input" placeholder="Search employee…"
+                [ngModel]="employeeSearch()" (ngModelChange)="employeeSearch.set($event)" />
+            </div>
+            <select class="sf-select" style="width:auto;"
+              [ngModel]="statusFilter()" (ngModelChange)="statusFilter.set($event)">
+              <option>All</option>
+              <option>Compliant</option>
+              <option>Non-Compliant</option>
+            </select>
+            <button class="sf-btn-ghost" type="button" (click)="resetFilters()">
+              <i class="bi bi-x-circle me-1"></i>Reset
+            </button>
+          </div>
+
+          @if (complianceLoading()) {
+            <div class="text-center py-4"><app-spinner></app-spinner></div>
+          } @else if (!summary() || filteredRecords.length === 0) {
+            <p class="sf-muted text-center py-4 mb-0">No compliance records found.</p>
+          } @else {
+            <!-- Employee-grouped drill-down -->
+            <div class="mt-2">
+              @for (group of employeeGroups; track group.employeeId) {
+                <!-- Employee summary row -->
+                <div class="sf-table-row d-flex align-items-center gap-2 px-2 py-2 rounded mb-1"
+                  style="cursor:pointer; border:1px solid var(--sf-border);"
+                  (click)="toggleEmployee(group.employeeId)">
+                  <i class="bi"
+                    [ngClass]="expandedEmployee() === group.employeeId ? 'bi-chevron-down' : 'bi-chevron-right'"
+                    style="font-size:0.75rem;"></i>
+                  <span class="fw-semibold flex-grow-1">{{ group.employeeName }}</span>
+                  <span class="sf-muted small me-2">
+                    {{ group.compliantCount }}/{{ group.records.length }} compliant
+                  </span>
+                  <app-status-badge
+                    [status]="group.compliantCount === group.records.length ? 'Compliant' : 'Non-Compliant'">
+                  </app-status-badge>
+                </div>
+
+                <!-- Expanded course-level detail -->
+                @if (expandedEmployee() === group.employeeId) {
+                  <div class="ms-4 mb-2">
+                    <table class="table sf-table mb-0" style="font-size:0.85rem;">
+                      <thead><tr><th>Course</th><th>Status</th><th>Date</th></tr></thead>
+                      <tbody>
+                        @for (r of group.records; track r.complianceId) {
+                          <tr class="sf-table-row">
+                            <td>{{ r.courseName }}</td>
+                            <td><app-status-badge [status]="complianceStatus(r.status)"></app-status-badge></td>
+                            <td class="sf-muted">{{ r.date | date:'mediumDate' }}</td>
+                          </tr>
+                        }
+                      </tbody>
+                    </table>
+                  </div>
+                }
+              }
+            </div>
+          }
+        </div>
+      </div>
+    }
+
+    <!-- Audit Log (Admin or HR) -->
+    @if (isAdminOrHR) {
+      <div [class]="isHR ? 'col-md-6' : 'col-12'">
+        <div class="sf-card h-100">
+          <div class="sf-card-title"><i class="bi bi-journal-text me-2"></i>Audit Log</div>
+          @if (auditLoading()) {
+            <div class="text-center py-4"><app-spinner></app-spinner></div>
+          } @else if (auditLogs().length === 0) {
+            <p class="sf-muted text-center py-4 mb-0">No audit logs found.</p>
+          } @else {
+            <div class="table-responsive mt-2">
+              <table class="table sf-table mb-0">
+                <thead>
+                  <tr>
+                    <th>User ID</th>
+                    <th>Action</th>
+                    <th>Resource</th>
+                    <th>Timestamp</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  @for (log of auditLogs(); track log.auditID) {
+                    <tr class="sf-table-row">
+                      <td class="fw-semibold">{{ log.userID ?? '—' }}</td>
+                      <td>{{ log.action }}</td>
+                      <td class="sf-muted">{{ log.resource }}</td>
+                      <td class="sf-muted" style="font-size:12px;">{{ log.timestamp | date:'medium':'+0530' }}</td>
+                    </tr>
+                  }
+                </tbody>
+              </table>
+            </div>
+          }
+          <p class="sf-muted small mt-2 mb-0"><i class="bi bi-lock-fill me-1"></i>Audit logs are immutable and read-only.</p>
+        </div>
+      </div>
+    }
+
+    <!-- No access -->
+    @if (!isHR && !isAdminOrHR) {
+      <div class="col-12">
+        <div class="sf-card text-center py-5">
+          <i class="bi bi-shield-lock fs-1 sf-muted"></i>
+          <p class="sf-muted mt-3 mb-0">You do not have permission to view compliance or audit data.</p>
+        </div>
+      </div>
+    }
+
+  </div>
+</div>

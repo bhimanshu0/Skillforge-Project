@@ -1,0 +1,503 @@
+import { Component, inject, signal, computed, OnInit } from '@angular/core';
+import { FormBuilder, Validators } from '@angular/forms';
+import { AuthService } from '../../core/services/auth.service';
+import { AssessmentService } from '../../core/services/assessment.service';
+import { CertificationService } from '../../core/services/certification.service';
+import { CourseService } from '../../core/services/course.service';
+import { UserService } from '../../core/services/user.service';
+import { SharedModule } from '../../shared/shared.module';
+import { AssessmentResponse, CertificationResponse, Course, CourseModule, EmployeeAssessment, PendingResult, User } from '../../core/models';
+
+// Assessment type enum values matching the backend (Quiz=0, Exam=1, Practical=2)
+const ASSESSMENT_TYPES = [
+  { label: 'Quiz',      value: 0 },
+  { label: 'Exam',      value: 1 },
+  { label: 'Practical', value: 2 },
+];
+
+@Component({
+  selector: 'app-assessments',
+  standalone: true,
+  imports: [SharedModule],
+  templateUrl: './assessments.html',
+})
+export class AssessmentsComponent implements OnInit {
+  readonly auth    = inject(AuthService);
+  private fb       = inject(FormBuilder);
+  private assessmentService    = inject(AssessmentService);
+  private certificationService = inject(CertificationService);
+  private courseService  = inject(CourseService);
+  private userService    = inject(UserService);
+
+  readonly assessmentTypes = ASSESSMENT_TYPES;
+
+  get canCreate() { return this.auth.hasRole('Trainer', 'Admin'); }
+  get isTrainer()  { return this.auth.hasRole('Trainer'); }
+  get isEmployee() { return this.auth.hasRole('Employee'); }
+  get canIssue()   { return this.auth.hasRole('HR', 'Admin'); }
+
+  // ── Data ──────────────────────────────────────────────────────────────────
+  assessments: AssessmentResponse[]      = [];
+  certifications: CertificationResponse[] = [];
+  courses: Course[]   = [];
+  employees: User[]   = [];
+
+  loadingAssessments = signal(true);
+  loadingCerts       = signal(true);
+  assessmentError    = signal<string | null>(null);
+  certError          = signal<string | null>(null);
+
+  // ── Employee: My Assessments ──────────────────────────────────────────────
+  myAssessments        = signal<EmployeeAssessment[]>([]);
+  loadingMyAssessments = signal(true);
+  showPendingOnly      = signal(false);
+
+  readonly filteredMyAssessments = computed(() =>
+    this.showPendingOnly()
+      ? this.myAssessments().filter(a => !a.isDone)
+      : this.myAssessments()
+  );
+
+  // ── Trainer: Pending Results ───────────────────────────────────────────────
+  pendingResults        = signal<PendingResult[]>([]);
+  pendingResultsLoading = signal(false);
+  evaluatingId          = signal<string | null>(null);
+
+  // ── Evaluate modal (Trainer) ───────────────────────────────────────────────
+  showEvalModal      = signal(false);
+  evalTarget         = signal<PendingResult | null>(null);
+  evalVerdict        = signal<'Pass' | 'Fail' | null>(null);
+  evalSubmitting     = signal(false);
+
+  // ── Take Assessment modal (employee) ──────────────────────────────────────
+  showTakeModal        = signal(false);
+  takeLoading          = signal(false);
+  selectedMyAssessment = signal<EmployeeAssessment | null>(null);
+
+  takeForm = this.fb.group({
+    score: [null as number | null, [Validators.required, Validators.min(0)]],
+  });
+
+  // ── Certification filter ──────────────────────────────────────────────────
+  certStatusFilter = signal<'All' | 'Active' | 'Expiring' | 'Expired'>('All');
+
+  get filteredCerts(): CertificationResponse[] {
+    const filter = this.certStatusFilter();
+    let list = this.certifications;
+
+    // Employees only see their own certifications
+    if (this.auth.hasRole('Employee')) {
+      const myId = this.auth.userId();
+      list = list.filter(c => c.employeeId === myId);
+    }
+
+    if (filter === 'All') return list;
+    const now = Date.now();
+    const thirtyDays = 30 * 24 * 60 * 60 * 1000;
+    return list.filter(c => {
+      if (filter === 'Expired')  return c.status?.toLowerCase() === 'expired'
+                                      || new Date(c.expiryDate).getTime() < now;
+      if (filter === 'Expiring') {
+        const exp = new Date(c.expiryDate).getTime();
+        return exp >= now && exp <= now + thirtyDays;
+      }
+      // Active
+      return c.status?.toLowerCase() === 'active'
+          && new Date(c.expiryDate).getTime() >= now;
+    });
+  }
+
+  // ── Toast ─────────────────────────────────────────────────────────────────
+  toast     = signal('');
+  toastType = signal<'success' | 'error'>('success');
+
+  // ── Create Assessment modal ───────────────────────────────────────────────
+  showCreateModal = signal(false);
+  createLoading   = signal(false);
+  coursesLoading  = signal(false);
+  modulesLoading  = signal(false);
+  createModules   = signal<CourseModule[]>([]);
+
+  createForm = this.fb.group({
+    courseId:     [null as number | null, Validators.required],
+    moduleId:     [null as number | null],
+    type:         [null as number | null, Validators.required],
+    maxScore:     [null as number | null, [Validators.required, Validators.min(1), Validators.max(100)]],
+    passingScore: [null as number | null, [Validators.required, Validators.min(1), Validators.max(100)]],
+  });
+
+  // ── Submit Result modal ───────────────────────────────────────────────────
+  showResultModal    = signal(false);
+  resultLoading      = signal(false);
+  employeesLoading   = signal(false);
+  selectedAssessment = signal<AssessmentResponse | null>(null);
+
+  resultForm = this.fb.group({
+    employeeID: [null as number | null, Validators.required],
+    score:      [null as number | null, [Validators.required, Validators.min(0)]],
+  });
+
+  // ── Issue Certification modal ─────────────────────────────────────────────
+  showIssueModal       = signal(false);
+  issueLoading         = signal(false);
+  issueEmpLoading      = signal(false);
+  issueCourseLoading   = signal(false);
+  issueEmployeeId      = signal<number | null>(null);
+  issueCourseId        = signal<number | null>(null);
+  issueEmployees: User[]   = [];
+  issueCourses: Course[]   = [];
+
+  // ── Lifecycle ─────────────────────────────────────────────────────────────
+  ngOnInit() {
+    if (this.isEmployee) {
+      this.loadMyAssessments();
+    } else {
+      this.loadAssessments();
+      if (this.isTrainer) this.loadPendingResults();
+    }
+    this.loadCertifications();
+  }
+
+  private loadPendingResults() {
+    this.pendingResultsLoading.set(true);
+    this.assessmentService.getPendingResults().subscribe({
+      next:  data => { this.pendingResults.set(data); this.pendingResultsLoading.set(false); },
+      error: ()   => this.pendingResultsLoading.set(false)
+    });
+  }
+
+  openEval(result: PendingResult) {
+    this.evalTarget.set(result);
+    this.evalVerdict.set(null);
+    this.showEvalModal.set(true);
+  }
+
+  closeEval() {
+    this.showEvalModal.set(false);
+    this.evalTarget.set(null);
+    this.evalVerdict.set(null);
+  }
+
+  submitEval() {
+    const target  = this.evalTarget();
+    const verdict = this.evalVerdict();
+    if (!target || !verdict) return;
+    this.evalSubmitting.set(true);
+    this.assessmentService.evaluateResult(target.assessmentId, target.employeeId, verdict === 'Pass').subscribe({
+      next: () => {
+        this.pendingResults.update(list =>
+          list.filter(r => !(r.assessmentId === target.assessmentId && r.employeeId === target.employeeId)));
+        this.closeEval();
+        this.evalSubmitting.set(false);
+        this.showToast(`Result marked as ${verdict}!`, 'success');
+      },
+      error: err => {
+        this.showToast(err?.error?.message ?? 'Failed to evaluate result.', 'error');
+        this.evalSubmitting.set(false);
+      }
+    });
+  }
+
+  private loadMyAssessments() {
+    this.loadingMyAssessments.set(true);
+    this.assessmentService.getMyAssessments().subscribe({
+      next:  data => { this.myAssessments.set(data); this.loadingMyAssessments.set(false); },
+      error: ()   => this.loadingMyAssessments.set(false)
+    });
+  }
+
+  openTake(assessment: EmployeeAssessment) {
+    this.selectedMyAssessment.set(assessment);
+    this.takeForm.reset();
+    this.takeForm.get('score')!.setValidators([Validators.required, Validators.min(0), Validators.max(assessment.maxScore)]);
+    this.takeForm.get('score')!.updateValueAndValidity();
+    this.showTakeModal.set(true);
+  }
+
+  closeTake() {
+    this.showTakeModal.set(false);
+    this.selectedMyAssessment.set(null);
+    this.takeForm.reset();
+  }
+
+  submitTake() {
+    if (this.takeForm.invalid) { this.takeForm.markAllAsTouched(); return; }
+    const assessment = this.selectedMyAssessment();
+    if (!assessment) return;
+    this.takeLoading.set(true);
+    const score = Number(this.takeForm.value.score);
+    this.assessmentService.selfSubmit(assessment.assessmentId, score).subscribe({
+      next: () => {
+        this.closeTake();
+        this.showToast('Assessment submitted successfully!', 'success');
+        this.takeLoading.set(false);
+        this.loadMyAssessments();
+      },
+      error: err => {
+        this.showToast(err?.error?.message ?? 'Failed to submit assessment.', 'error');
+        this.takeLoading.set(false);
+      }
+    });
+  }
+
+  private loadAssessments() {
+    this.loadingAssessments.set(true);
+    this.assessmentService.getAll().subscribe({
+      next:  data => { this.assessments = data; this.loadingAssessments.set(false); },
+      error: err  => { this.assessmentError.set(err?.error?.message ?? 'Failed to load assessments.'); this.loadingAssessments.set(false); }
+    });
+  }
+
+  private loadCertifications() {
+    this.loadingCerts.set(true);
+    this.certificationService.getAll().subscribe({
+      next:  data => { this.certifications = data; this.loadingCerts.set(false); },
+      error: err  => { this.certError.set(err?.error?.message ?? 'Failed to load certifications.'); this.loadingCerts.set(false); }
+    });
+  }
+
+  // ── Create Assessment ─────────────────────────────────────────────────────
+  openCreate() {
+    this.showCreateModal.set(true);
+    if (this.courses.length === 0) {
+      this.coursesLoading.set(true);
+      const trainerId = this.isTrainer ? (this.auth.userId() ?? undefined) : undefined;
+      this.courseService.getAll(trainerId).subscribe({
+        next:  data => { this.courses = data.filter(c => c.status); this.coursesLoading.set(false); },
+        error: ()   => this.coursesLoading.set(false)
+      });
+    }
+  }
+
+  onCreateCourseChange(courseId: number | null | undefined) {
+    this.createForm.patchValue({ moduleId: null });
+    this.createModules.set([]);
+    if (!courseId) return;
+    this.modulesLoading.set(true);
+    this.courseService.getModules(Number(courseId)).subscribe({
+      next: mods => { this.createModules.set(mods); this.modulesLoading.set(false); },
+      error: ()   => this.modulesLoading.set(false)
+    });
+  }
+
+  closeCreate() {
+    this.showCreateModal.set(false);
+    this.createForm.reset();
+    this.createModules.set([]);
+  }
+
+  submitCreate() {
+    if (this.createForm.invalid) { this.createForm.markAllAsTouched(); return; }
+    this.createLoading.set(true);
+    const { courseId, moduleId, type, maxScore, passingScore } = this.createForm.value as any;
+    this.assessmentService.create(Number(courseId), Number(type), Number(maxScore), Number(passingScore), moduleId ? Number(moduleId) : null).subscribe({
+      next: () => {
+        this.closeCreate();
+        this.showToast('Assessment created successfully!', 'success');
+        this.createLoading.set(false);
+        this.loadAssessments();
+      },
+      error: err => {
+        this.showToast(err?.error?.message ?? 'Failed to create assessment.', 'error');
+        this.createLoading.set(false);
+      }
+    });
+  }
+
+  // ── Submit Result ─────────────────────────────────────────────────────────
+  openManage(assessment: AssessmentResponse) {
+    this.selectedAssessment.set(assessment);
+    this.resultForm.reset();
+    this.resultForm.get('score')!.setValidators([Validators.required, Validators.min(0), Validators.max(assessment.maxScore)]);
+    this.resultForm.get('score')!.updateValueAndValidity();
+    this.showResultModal.set(true);
+    if (this.employees.length === 0) {
+      this.employeesLoading.set(true);
+      this.userService.getAll().subscribe({
+        next:  users => { this.employees = users.filter(u => u.roleName === 'Employee'); this.employeesLoading.set(false); },
+        error: ()    => this.employeesLoading.set(false)
+      });
+    }
+  }
+
+  closeManage() {
+    this.showResultModal.set(false);
+    this.selectedAssessment.set(null);
+    this.resultForm.reset();
+  }
+
+  submitResult() {
+    if (this.resultForm.invalid) { this.resultForm.markAllAsTouched(); return; }
+    const assessment = this.selectedAssessment();
+    if (!assessment) return;
+    this.resultLoading.set(true);
+    const { employeeID, score } = this.resultForm.value as any;
+    this.assessmentService.submitResult(assessment.assessmentId, Number(employeeID), Number(score)).subscribe({
+      next: () => {
+        this.closeManage();
+        this.showToast('Result submitted successfully!', 'success');
+        this.resultLoading.set(false);
+      },
+      error: err => {
+        this.showToast(err?.error?.message ?? 'Failed to submit result.', 'error');
+        this.resultLoading.set(false);
+      }
+    });
+  }
+
+  // ── Issue Certification ───────────────────────────────────────────────────
+  openIssue() {
+    this.issueEmployeeId.set(null);
+    this.issueCourseId.set(null);
+    this.showIssueModal.set(true);
+
+    if (this.issueEmployees.length === 0) {
+      this.issueEmpLoading.set(true);
+      this.userService.getAll().subscribe({
+        next:  users => { this.issueEmployees = users.filter(u => u.roleName === 'Employee'); this.issueEmpLoading.set(false); },
+        error: ()    => this.issueEmpLoading.set(false)
+      });
+    }
+    if (this.issueCourses.length === 0) {
+      this.issueCourseLoading.set(true);
+      this.courseService.getAll().subscribe({
+        next:  data => { this.issueCourses = data.filter(c => c.status); this.issueCourseLoading.set(false); },
+        error: ()   => this.issueCourseLoading.set(false)
+      });
+    }
+  }
+
+  closeIssue() {
+    this.showIssueModal.set(false);
+    this.issueEmployeeId.set(null);
+    this.issueCourseId.set(null);
+  }
+
+  submitIssue() {
+    const empId    = this.issueEmployeeId();
+    const courseId = this.issueCourseId();
+    if (!empId || !courseId) return;
+    this.issueLoading.set(true);
+    this.certificationService.issue(empId, courseId).subscribe({
+      next: () => {
+        this.closeIssue();
+        this.showToast('Certification issued successfully!', 'success');
+        this.issueLoading.set(false);
+        this.loadCertifications();
+      },
+      error: err => {
+        this.showToast(err?.error?.message ?? 'Failed to issue certification.', 'error');
+        this.issueLoading.set(false);
+      }
+    });
+  }
+
+  // ── Export Certifications (CSV) ───────────────────────────────────────────
+  exportCerts() {
+    const rows = [
+      ['Employee', 'Course', 'Description', 'Issued Date', 'Expiry Date', 'Status'],
+      ...this.filteredCerts.map(c => [
+        c.employeeName,
+        c.courseName,
+        c.courseDescription ?? '',
+        c.issueDate,
+        c.expiryDate,
+        c.status,
+      ])
+    ];
+    const csv = rows.map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n');
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = `certifications-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  // ── Download Certificate (print-to-PDF) ──────────────────────────────────
+  downloadCert(cert: CertificationResponse) {
+    const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <title>Certificate – ${cert.courseName}</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700&family=Inter:wght@400;600&display=swap');
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #fff; display: flex; align-items: center; justify-content: center; min-height: 100vh; font-family: 'Inter', sans-serif; }
+    .cert {
+      width: 800px; padding: 60px 80px; border: 12px solid #1a1a2e;
+      outline: 4px solid #e2b04a; outline-offset: -20px;
+      text-align: center; position: relative;
+    }
+    .logo { font-size: 28px; font-weight: 700; letter-spacing: 3px; color: #1a1a2e; text-transform: uppercase; margin-bottom: 6px; }
+    .subtitle { font-size: 12px; letter-spacing: 5px; text-transform: uppercase; color: #6b7280; margin-bottom: 40px; }
+    .presents { font-size: 13px; color: #6b7280; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 2px; }
+    .title { font-family: 'Playfair Display', serif; font-size: 42px; color: #1a1a2e; margin-bottom: 4px; }
+    .of { font-size: 13px; color: #6b7280; margin-bottom: 24px; text-transform: uppercase; letter-spacing: 2px; }
+    .name { font-family: 'Playfair Display', serif; font-size: 36px; color: #e2b04a; border-bottom: 2px solid #e2b04a; display: inline-block; padding-bottom: 4px; margin-bottom: 28px; }
+    .body { font-size: 14px; color: #374151; line-height: 1.8; max-width: 500px; margin: 0 auto 32px; }
+    .course { font-weight: 600; color: #1a1a2e; font-size: 16px; }
+    .meta { display: flex; justify-content: space-around; margin-top: 40px; }
+    .meta-item { text-align: center; }
+    .meta-label { font-size: 11px; letter-spacing: 2px; text-transform: uppercase; color: #9ca3af; }
+    .meta-value { font-size: 13px; font-weight: 600; color: #1a1a2e; margin-top: 2px; }
+    .seal { width: 80px; height: 80px; border-radius: 50%; background: #1a1a2e; color: #e2b04a;
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            margin: 0 auto 32px; font-size: 10px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; }
+    .seal-inner { font-size: 22px; }
+    @media print {
+      body { margin: 0; }
+      .cert { border: 12px solid #1a1a2e !important; outline: 4px solid #e2b04a !important; }
+    }
+  </style>
+</head>
+<body>
+<div class="cert">
+  <div class="logo">SkillForge</div>
+  <div class="subtitle">Learning & Development Platform</div>
+  <div class="seal"><div class="seal-inner">★</div>Certified</div>
+  <div class="presents">This is to certify that</div>
+  <div class="name">${cert.employeeName}</div>
+  <div class="of">has successfully completed</div>
+  <div class="course">${cert.courseName}</div>
+  <div class="body">${cert.courseDescription || 'and has demonstrated the required knowledge and skills as assessed by the SkillForge platform.'}</div>
+  <div class="meta">
+    <div class="meta-item">
+      <div class="meta-label">Issue Date</div>
+      <div class="meta-value">${new Date(cert.issueDate).toLocaleDateString('en-GB', { day:'numeric', month:'long', year:'numeric' })}</div>
+    </div>
+    <div class="meta-item">
+      <div class="meta-label">Certificate ID</div>
+      <div class="meta-value">#SF-${String(cert.certificationId).padStart(6, '0')}</div>
+    </div>
+    <div class="meta-item">
+      <div class="meta-label">Valid Until</div>
+      <div class="meta-value">${new Date(cert.expiryDate).toLocaleDateString('en-GB', { day:'numeric', month:'long', year:'numeric' })}</div>
+    </div>
+  </div>
+</div>
+<script>window.onload = () => { window.print(); }<\/script>
+</body>
+</html>`;
+
+    const win = window.open('', '_blank');
+    if (win) {
+      win.document.write(html);
+      win.document.close();
+    }
+  }
+
+  // ── Helpers ───────────────────────────────────────────────────────────────
+  isExpiringSoon(cert: CertificationResponse): boolean {
+    const now = Date.now();
+    const exp = new Date(cert.expiryDate).getTime();
+    return exp >= now && exp <= now + 30 * 24 * 60 * 60 * 1000;
+  }
+
+  showToast(msg: string, type: 'success' | 'error') {
+    this.toast.set(msg); this.toastType.set(type);
+    setTimeout(() => this.toast.set(''), 3500);
+  }
+}
