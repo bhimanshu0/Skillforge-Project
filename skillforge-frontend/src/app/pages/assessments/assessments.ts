@@ -31,10 +31,12 @@ export class AssessmentsComponent implements OnInit {
 
   readonly assessmentTypes = ASSESSMENT_TYPES;
 
-  get canCreate() { return this.auth.hasRole('Trainer', 'Admin'); }
+  // Only Trainers create / grade assessments. Admin no longer has an entry
+  // point — they oversee, but don't author content.
+  get canCreate() { return this.auth.hasRole('Trainer'); }
   get isTrainer()  { return this.auth.hasRole('Trainer'); }
   get isEmployee() { return this.auth.hasRole('Employee'); }
-  get canIssue()   { return this.auth.hasRole('HR', 'Admin'); }
+  // (canIssue removed — certifications are auto-issued on course completion.)
 
   // ── Data ──────────────────────────────────────────────────────────────────
   assessments: AssessmentResponse[]      = [];
@@ -137,15 +139,8 @@ export class AssessmentsComponent implements OnInit {
     score:      [null as number | null, [Validators.required, Validators.min(0)]],
   });
 
-  // ── Issue Certification modal ─────────────────────────────────────────────
-  showIssueModal       = signal(false);
-  issueLoading         = signal(false);
-  issueEmpLoading      = signal(false);
-  issueCourseLoading   = signal(false);
-  issueEmployeeId      = signal<number | null>(null);
-  issueCourseId        = signal<number | null>(null);
-  issueEmployees: User[]   = [];
-  issueCourses: Course[]   = [];
+  // (Issue Certification modal removed — certifications are auto-issued when
+  // a course is completed. There is no manual "issue cert" UI any more.)
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
   ngOnInit() {
@@ -250,7 +245,13 @@ export class AssessmentsComponent implements OnInit {
 
   private loadCertifications() {
     this.loadingCerts.set(true);
-    this.certificationService.getAll().subscribe({
+    // Employees use /Certification/my (their own only); non-Employee roles use
+    // the org-wide /Certification/certifications. Calling the org-wide endpoint
+    // as an Employee would 403 (and would leak other employees' cert metadata).
+    const source$ = this.isEmployee
+      ? this.certificationService.getMy()
+      : this.certificationService.getAll();
+    source$.subscribe({
       next:  data => { this.certifications = data; this.loadingCerts.set(false); },
       error: err  => { this.certError.set(err?.error?.message ?? 'Failed to load certifications.'); this.loadingCerts.set(false); }
     });
@@ -345,52 +346,8 @@ export class AssessmentsComponent implements OnInit {
     });
   }
 
-  // ── Issue Certification ───────────────────────────────────────────────────
-  openIssue() {
-    this.issueEmployeeId.set(null);
-    this.issueCourseId.set(null);
-    this.showIssueModal.set(true);
-
-    if (this.issueEmployees.length === 0) {
-      this.issueEmpLoading.set(true);
-      this.userService.getAll().subscribe({
-        next:  users => { this.issueEmployees = users.filter(u => u.roleName === 'Employee'); this.issueEmpLoading.set(false); },
-        error: ()    => this.issueEmpLoading.set(false)
-      });
-    }
-    if (this.issueCourses.length === 0) {
-      this.issueCourseLoading.set(true);
-      this.courseService.getAll().subscribe({
-        next:  data => { this.issueCourses = data.filter(c => c.status); this.issueCourseLoading.set(false); },
-        error: ()   => this.issueCourseLoading.set(false)
-      });
-    }
-  }
-
-  closeIssue() {
-    this.showIssueModal.set(false);
-    this.issueEmployeeId.set(null);
-    this.issueCourseId.set(null);
-  }
-
-  submitIssue() {
-    const empId    = this.issueEmployeeId();
-    const courseId = this.issueCourseId();
-    if (!empId || !courseId) return;
-    this.issueLoading.set(true);
-    this.certificationService.issue(empId, courseId).subscribe({
-      next: () => {
-        this.closeIssue();
-        this.showToast('Certification issued successfully!', 'success');
-        this.issueLoading.set(false);
-        this.loadCertifications();
-      },
-      error: err => {
-        this.showToast(err?.error?.message ?? 'Failed to issue certification.', 'error');
-        this.issueLoading.set(false);
-      }
-    });
-  }
+  // (openIssue/closeIssue/submitIssue removed — certifications are auto-issued
+  // when a course is completed; no manual issuance UI any more.)
 
   // ── Export Certifications (CSV) ───────────────────────────────────────────
   exportCerts() {

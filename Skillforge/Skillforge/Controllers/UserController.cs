@@ -21,8 +21,13 @@ namespace Skillforge.Controller
             _userService = userService;
         }
         
+        // Used as the canonical "users to pick from" source by HR (SkillGap
+        // employee dropdown, Issue Cert employee dropdown — when applicable),
+        // Manager (BulkEnroll employee picker), Trainer (course-related pickers),
+        // and Admin (IAM). Employees do NOT need the org-wide user list.
+        // UserResponseDto already excludes password / sensitive fields.
         [HttpGet("GetAll")]
-        [Authorize(Roles = nameof(UserRole.Admin))]
+        [Authorize(Roles = nameof(UserRole.Admin) + "," + nameof(UserRole.HR) + "," + nameof(UserRole.Manager) + "," + nameof(UserRole.Trainer))]
         public async Task<IActionResult> GetAllUsers()
         {
             try
@@ -30,9 +35,9 @@ namespace Skillforge.Controller
                 List<UserResponseDto> users = await _userService.GetAllUsersAsync();
                 return Ok(users);
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                return NotFound(ex.Message);
+                return StatusCode(500, new { message = "Unable to fetch users." });
             }
         }
         /// <summary>

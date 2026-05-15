@@ -1,21 +1,10 @@
-using System.ComponentModel.DataAnnotations;
-
 namespace Skillforge.Dto;
 
-/// <summary>
-/// Request DTO for issuing a certification to an employee who passed a course assessment.
-/// </summary>
-public class IssueCertificationRequestDto
-{
-    [Required]
-    public int EmployeeId { get; set; }
-
-    [Required]
-    public int CourseId { get; set; }
-}
+// (IssueCertificationRequestDto removed — certificates are auto-issued, no
+// manual request DTO needed.)
 
 /// <summary>
-/// Response DTO returned after successfully issuing a certification.
+/// Response DTO returned for cert lookups (own + org-wide list + PDF download).
 /// </summary>
 public class CertificationResponseDto
 {
